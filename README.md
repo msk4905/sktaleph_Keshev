@@ -422,7 +422,7 @@
 
 ### 설치 (재현 순서)
 1. 준비: Node.js 22 이상, GitHub 계정, Vercel 계정, Supabase 프로젝트(`public.notes` 표는 Git 제외인 `supabase/schema.sql`로 학생이 만듦).
-2. 받기: `git clone https://github.com/msk4905/choi-bujang-secret-vault` → `cd choi-bujang-secret-vault` → `git log -1 --format="%h %s"`로 제목이 `12단계 저장점`인지 확인(기본 브랜치 `main`이 이 저장점) → `npm install`.
+2. 받기: `git clone https://github.com/msk4905/sktaleph_Keshev` → `cd sktaleph_Keshev` → `git log -1 --format="%h %s"`로 제목이 `12단계 저장점`인지 확인(기본 브랜치 `main`이 이 저장점) → `npm install`.
 3. 코드 시험: `npm test` (가짜 DB·가상 요청, 실제 서버를 쓰지 않음).
 4. 가상 연습: `npm run decider:test` · `npm run detect:test` · `npm run policy:verify`(사본 검증, 실행 기록을 `policy/`에 덧붙임).
 5. 표 만들기: Supabase SQL Editor에서 학생이 직접 `supabase/10-restore-tables.sql`, `supabase/12-war-room.sql`을 실행합니다. 사본 만들기 문장은 주석이며 `<NOTE_UUID>`·`<B_USER_UUID>`를 학생이 바꿔 침해 **전에** 실행합니다.
