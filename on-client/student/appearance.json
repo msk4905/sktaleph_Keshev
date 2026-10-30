@@ -1,0 +1,10 @@
+{
+  "schema": "alekov.student-appearance.v1",
+  "appName": "Keshev",
+  "palette": {
+    "accent": "#5c6bc0",
+    "background": "#f5f6fb",
+    "surface": "#ffffff"
+  },
+  "dashboardPreset": "student-first"
+}

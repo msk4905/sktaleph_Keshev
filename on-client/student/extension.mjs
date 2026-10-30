@@ -1446,27 +1446,91 @@ function pcSdpObservation(input) {
   return 'SDP 연결 확인 불가 · 연결 자료를 불러오는 중이거나 응답이 없거나 일치하지 않습니다. 필요하면 위쪽 「다시 불러오기」로 서버 상태를 확인하세요.';
 }
 
+// 마무리 4단계: 공통 UI와 CSP를 보존한다. 기존 클래스와 SVG 표시 속성만 사용한다.
+function pcDetails(title, key) {
+  const detail = makeNode('details');
+  detail.append(makeNode('summary', title));
+  if (key) detail.setAttribute('data-pc-disclosure', key);
+  return detail;
+}
+
+function pcDisplayTime(value) {
+  const date = typeof value === 'string' ? new Date(value) : null;
+  if (!date || !Number.isFinite(date.getTime())) return '측정 시각 없음';
+  return date.toLocaleString('ko-KR', {timeZone: 'Asia/Seoul', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false}) + ' KST · 한국 시각';
+}
+
+function pcSvg(tag, attrs, text) {
+  const element = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [key, value] of Object.entries(attrs)) element.setAttribute(key, String(value));
+  if (text != null) element.textContent = text;
+  return element;
+}
+
+function pcRingCard(field, current, before, measuredAt, phase, available) {
+  const row = makeNode('section', null, 'event');
+  row.setAttribute('data-student-pc-ring-card', field.key);
+  if (current) row.setAttribute('data-student-pc-metric', field.key);
+  row.append(makeNode('h4', field.title));
+  const calculated = !current || current.value === null ? NaN : field.key === 'cpu' ? current.value : current.value * 1024 ** 3 / current.total * 100;
+  const ratio = Number.isFinite(calculated) && calculated >= 0 && calculated <= 100 ? calculated : null;
+  const shown = ratio === null ? '—' : `${ratio.toFixed(1)}%`;
+  const svg = pcSvg('svg', {width: 160, height: 156, viewBox: '0 0 160 156', role: 'img',
+    'data-student-pc-ring': field.key, 'aria-label': ratio === null ? `${field.title}: 확인 불가`
+      : `[실측] ${field.title} ${shown}${field.key === 'disk' ? ' 여유 비율' : ' 사용 비율'}`});
+  svg.append(
+    pcSvg('circle', {cx: 80, cy: 78, r: 57, fill: 'none', stroke: 'var(--accent-soft)', 'stroke-width': 9}),
+    pcSvg('circle', {cx: 80, cy: 78, r: 57, fill: 'none', stroke: 'var(--accent)', 'stroke-width': 9, 'stroke-linecap': 'round',
+      pathLength: 100, 'stroke-dasharray': `${ratio ?? 0} 100`, 'stroke-opacity': ratio !== null && ratio > 0 ? 1 : 0,
+      transform: 'rotate(-90 80 78)', 'data-student-pc-arc': 'true'}),
+    pcSvg('text', {x: 80, y: 87, 'text-anchor': 'middle', fill: 'var(--text)', 'font-size': 29, 'font-family': 'system-ui, sans-serif'}, shown));
+  row.append(svg);
+  const valid = current && current.value !== null;
+  const valueText = valid ? field.key === 'cpu' ? `${current.value.toFixed(1)}% 사용`
+    : `${current.value.toFixed(1)} / ${(current.total / 1024 ** 3).toFixed(1)} GB ${field.key === 'disk' ? '여유' : '사용'}` : '확인 불가';
+  const value = makeNode('p', `${valid ? '[실측] ' : ''}${valueText}${current?.reason ? ` — ${current.reason}` : ''}`);
+  value.setAttribute('data-pc-compare-value', 'current');
+  row.append(value);
+  if (measuredAt) row.append(makeNode('p', pcDisplayTime(measuredAt), 'muted'));
+  if (!current) {
+    row.append(makeNode('p', !available ? '제공 「내 PC 상태」를 확인하세요.' : phase === 'loading' ? '조회 중 · 이전 값은 비웠습니다.'
+      : phase === 'error' ? '조회 실패 · 위쪽 오류 안내를 확인하세요.' : '아직 조회하지 않았습니다.', 'muted'));
+    return row;
+  }
+  const change = pcCompareChange(before, current, field);
+  row.append(makeNode('p', change, 'muted'));
+  const detail = pcDetails('이전 값·단위 상세', 'metric-' + field.key);
+  const facts = makeNode('dl', null, 'kv');
+  facts.append(makeNode('dt', '이전 조회값'), makeNode('dd', before ? before.text + (before.reason ? ` — ${before.reason}` : '') : '이전 조회 없음'),
+    makeNode('dt', '이번 조회값'), makeNode('dd', current.text + (current.reason ? ` — ${current.reason}` : '')),
+    makeNode('dt', '변화·한계'), makeNode('dd', change));
+  detail.append(facts);
+  row.append(detail);
+  return row;
+}
+
 function renderPcSecurityObservation(state, input, available) {
   const section = makeNode('section');
   section.setAttribute('data-student-pc-security', 'true');
-  section.append(makeNode('hr'), makeNode('h4', 'PC 보안 관찰 요약'));
-  const sdp = makeNode('p', pcSdpObservation(input), 'state state-empty');
-  sdp.setAttribute('data-student-sdp-status', 'true');
-  section.append(sdp);
-  section.append(makeNode('p', '이 건수는 침해나 공격 탐지 결과가 아닙니다. 방화벽·보안 설정을 읽기만 하며 변경하거나 관리자 권한으로 다시 시도하지 않습니다.', 'muted'));
+  section.append(makeNode('h4', 'PC 보안 관찰 요약'), makeNode('p', '이 건수는 침해나 공격 탐지 결과가 아닙니다.', 'muted'));
   const snapshot = state.phase === 'ready' ? state.current : null;
   if (snapshot) {
     const observed = PC_SECURITY_FIELDS.filter(field => snapshot.observations[field.key].state === 'ok').length;
     section.append(makeNode('p', `보안 관찰 ${observed}/3개 항목 확인 · 확인 불가 ${3 - observed}개${observed === 0 ? ' · 값을 읽은 항목이 없습니다.' : ''}`));
-    section.append(makeNode('p', `${observed > 0 ? '[실측]' : '[PC 조회 응답]'} 출처: 제공 PC 조회 · 조회 시각 ${eventTime(snapshot.measuredAt)}. 아래 값은 이 시각의 관찰이며 지금 상태를 보장하지 않습니다.`, 'muted'));
+    section.append(makeNode('p', `${observed > 0 ? '[실측]' : '[PC 조회 응답]'} 제공 PC 조회 · ${pcDisplayTime(snapshot.measuredAt)}`, 'muted'));
   }
   for (const field of PC_SECURITY_FIELDS) {
     const item = makeNode('section');
     item.setAttribute('data-student-pc-observation', field.key);
-    item.append(makeNode('h5', field.title));
+    item.append(makeNode('h4', field.title));
     const metric = snapshot?.observations[field.key];
     if (metric?.state === 'ok') {
-      item.append(makeNode('p', metric.text), makeNode('p', metric.note, 'muted'));
+      item.append(makeNode('p', metric.text));
+      const detail = pcDetails('조회 범위와 해석 한계', 'observation-' + field.key);
+      detail.append(makeNode('p', metric.note, 'muted'));
+      item.append(detail);
+      if (field.key === 'events' && metric.text.includes('일부 집계')) item.append(makeNode('p', '전체 건수가 아닌 일부 집계입니다.', 'state state-empty'));
     } else {
       let reason;
       if (!available) reason = '학생 PC 조회를 지원하지 않습니다. 위쪽 제공 「내 PC 상태」를 확인하세요.';
@@ -1478,7 +1542,27 @@ function renderPcSecurityObservation(state, input, available) {
     }
     section.append(item);
   }
+  section.append(makeNode('p', '방화벽·보안 설정은 읽기만 합니다. 권한 부족 시 관리자 권한으로 재시도하지 않습니다.', 'muted'));
+  const sdp = makeNode('p', pcSdpObservation(input), 'state state-empty');
+  sdp.setAttribute('data-student-sdp-status', 'true');
+  section.append(sdp);
   return section;
+}
+
+function studentStatusDetails(input) {
+  const resources = input && typeof input === 'object' ? input : {};
+  const state = value => value?.status === 'ok' ? '조회됨' : value?.status === 'loading' ? '조회 중' : '확인 불가';
+  const count = Array.isArray(resources.notifications) ? `${resources.notifications.length}건` : '확인 불가';
+  const root = makeNode('section');
+  root.append(makeNode('p', `기기 목록 ${state(resources.devices)} · 세션 ${state(resources.sessions)} · 알림 ${count}`, 'muted'));
+  if (resources.devices?.status !== 'ok' || resources.sessions?.status !== 'ok') {
+    root.append(makeNode('p', '기기·세션 자료를 확인하지 못했거나 조회 중입니다. 연결 상태와 아래 상세를 확인한 뒤 필요하면 위쪽 「다시 불러오기」를 누르세요.', 'state state-empty'));
+  }
+  if (Array.isArray(resources.notifications) && resources.notifications.length) root.append(notificationBlock(resources.notifications));
+  const detail = pcDetails('기기·세션·알림·도움정보 상세');
+  detail.append(statusSection(input));
+  root.append(detail);
+  return root;
 }
 
 function pcCompareSnapshot(data, previous) {
@@ -1509,6 +1593,8 @@ function createPcComparison({ api, onChange }) {
   const available = typeof api?.get === 'function';
   let state = { phase: 'idle', current: null, previous: null, failure: '' };
   let busy = false;
+  let layoutObserver;
+  const openDetails = new Set();
   const notify = () => {
     const restoreFocus = document.activeElement?.id === buttonId;
     if (typeof onChange === 'function') onChange();
@@ -1547,53 +1633,75 @@ function createPcComparison({ api, onChange }) {
     }
   }
   function render(input) {
+    if (layoutObserver) layoutObserver.disconnect();
     const section = makeNode('section');
     section.setAttribute('data-student-pc-comparison', 'true');
     section.setAttribute('aria-busy', String(busy));
-    section.append(makeNode('h3', 'PC 조회 변화 비교'));
-    section.append(makeNode('p', '제공 기능이 측정하고, 학생 구현이 변화 비교와 보안 관찰을 설명합니다. 이 버튼 한 번으로 비교와 보안 관찰 자료를 함께 읽습니다. 위쪽 제공 「내 PC 상태」의 조회와는 별개입니다.', 'muted'));
-    section.append(makeNode('p', 'PC 실측은 보안 사건의 예시 모드·SDP 서버 연결 상태와 별개입니다. 비교 자료는 이 화면을 열어 둔 동안만 보관하며, 새로고침하면 초기화합니다.', 'muted'));
+    const heading = makeNode('div', null, 'row');
+    heading.append(makeNode('h3', 'PC 관찰과 변화 비교'));
     const button = makeNode('button', busy ? 'PC 조회 중…' : state.phase === 'idle' ? '비교용 조회' : '다시 조회', 'btn');
     button.id = buttonId;
     button.type = 'button';
     button.disabled = !available;
     button.setAttribute('aria-disabled', String(busy || !available));
     button.addEventListener('click', () => { void read(); });
-    section.append(button);
+    heading.append(button);
+    section.append(heading);
     const status = makeNode('p');
     status.setAttribute('role', 'status');
     if (!available) status.textContent = '학생 PC 조회를 사용할 수 없습니다. 위쪽 제공 「내 PC 상태」를 확인하세요.';
-    else if (state.phase === 'idle') status.textContent = '아직 조회하지 않았습니다. 버튼을 누르면 일반 권한으로 한 번 읽습니다. 자동으로 반복 조회하지 않습니다.';
+    else if (state.phase === 'idle') status.textContent = '아직 조회하지 않았습니다. 일반 권한으로 한 번 읽으며 자동으로 반복 조회하지 않습니다.';
     else if (busy) status.textContent = 'PC 실측 조회 중입니다. 이전 값을 현재 결과로 표시하지 않으며 중복 요청하지 않습니다.';
-    else if (state.phase === 'error') {
-      status.className = 'state state-error';
-      status.textContent = `조회 실패 · CPU·메모리·디스크 확인 불가. ${state.failure} 비교 자료는 초기화했습니다.`;
-    }
-    section.append(status);
-    section.append(renderPcSecurityObservation(state, input, available));
-    if (state.phase === 'ready') {
-      const count = PC_COMPARE_FIELDS.filter(field => state.current.metrics[field.key].value !== null).length;
+    else if (state.phase === 'error') status.textContent = `조회 실패 · CPU·메모리·디스크 확인 불가. ${state.failure} 비교 자료는 초기화했습니다.`;
+    const snapshot = state.phase === 'ready' ? state.current : null;
+    if (snapshot) {
+      const count = PC_COMPARE_FIELDS.filter(field => snapshot.metrics[field.key].value !== null).length;
       status.textContent = `${count === 3 ? '조회 완료' : count === 0 ? '확인 불가' : '부분 결과'} · 실측 ${count}/3 · 확인 불가 ${3 - count}개`;
-      section.append(makeNode('p', `${count > 0 ? '[실측]' : '[PC 조회 응답]'} 출처: 이 앱을 실행한 PC의 제공 조회 기능 (/api/pc/status)`, 'muted'));
-      const times = makeNode('dl', null, 'kv');
-      times.append(makeNode('dt', '이전 조회 시각'), makeNode('dd', state.previous ? eventTime(state.previous.measuredAt) : '이전 자료 없음'));
-      times.append(makeNode('dt', '이번 조회 시각'), makeNode('dd', eventTime(state.current.measuredAt)));
-      section.append(times);
-      for (const field of PC_COMPARE_FIELDS) {
-        const row = makeNode('section');
-        row.setAttribute('data-student-pc-metric', field.key);
-        row.append(makeNode('hr'), makeNode('h4', field.title));
-        const before = state.previous?.metrics[field.key], current = state.current.metrics[field.key];
-        const facts = makeNode('dl', null, 'kv');
-        const oldValue = makeNode('dd', before ? before.text + (before.reason ? ` — ${before.reason}` : '') : '이전 조회 없음');
-        const newValue = makeNode('dd', current.text + (current.reason ? ` — ${current.reason}` : ''));
-        const change = makeNode('dd', pcCompareChange(before, current, field));
-        newValue.setAttribute('data-pc-compare-value', 'current');
-        facts.append(makeNode('dt', '이전 조회값'), oldValue, makeNode('dt', '이번 조회값'), newValue, makeNode('dt', '변화·한계'), change);
-        row.append(facts); section.append(row);
-      }
     }
-    section.append(makeNode('p', '이전·이번 값은 위에 적힌 각 조회 시각의 값이며 지금 상태를 보장하지 않습니다. CPU는 200ms 표본이며 변화는 사용률의 차이(%p)입니다. 용량은 제공 카드와 같이 1 GB = 1024³바이트로 표시합니다. 두 조회 사이의 지속 추이나 원인을 확인한 결과는 아니며, 변화만으로 침해·공격·악성코드 여부를 판단하지 않습니다.', 'muted'));
+    status.className = state.phase === 'error' ? 'state state-error' : busy ? 'state state-loading' : 'state state-empty';
+    section.append(status, makeNode('p', '자원 사용·여유 비율이며 보안 점수가 아닙니다. 제공 조회의 결과를 학생 화면에서 비교합니다.', 'muted'));
+    const rings = makeNode('div', null, 'row');
+    for (const field of PC_COMPARE_FIELDS) rings.append(pcRingCard(field, snapshot?.metrics[field.key], state.previous?.metrics[field.key], snapshot?.measuredAt, state.phase, available));
+    section.append(rings);
+    const bottom = makeNode('div', null, 'grid-2');
+    bottom.append(renderPcSecurityObservation(state, input, available));
+    const history = makeNode('section');
+    history.append(makeNode('h4', '조회 이력'));
+    const times = makeNode('dl', null, 'kv');
+    times.append(makeNode('dt', '이번 조회 시각'), makeNode('dd', snapshot ? pcDisplayTime(snapshot.measuredAt) : '확인 불가 · 현재 조회값 없음'),
+      makeNode('dt', '이전 조회 시각'), makeNode('dd', state.previous && snapshot ? pcDisplayTime(state.previous.measuredAt) : '이전 자료 없음'));
+    history.append(times);
+    history.append(makeNode('p', snapshot ? '[실측 출처] 이 앱을 실행한 PC의 제공 조회 기능 (/api/pc/status)' : '아직 실측 결과가 없습니다. 예시 값으로 대신하지 않습니다.', 'muted'));
+    history.append(makeNode('p', 'PC 실측과 보안 사건의 예시 모드·SDP 서버 연결은 별개입니다. 비교 이력은 이 화면을 열어 둔 동안만 보관하며 새로고침하면 초기화합니다.', 'muted'));
+    const guide = pcDetails('측정 범위·시각·제공 기능과의 구분', 'scope');
+    if (snapshot) guide.append(makeNode('p', `이번: ${eventTime(snapshot.measuredAt)}`, 'muted'));
+    if (snapshot && state.previous) guide.append(makeNode('p', `이전: ${eventTime(state.previous.measuredAt)}`, 'muted'));
+    guide.append(makeNode('p', '제공 기능이 측정하고 학생 구현이 비교·요약합니다. 위쪽 제공 「내 PC 상태」의 조회와는 별개이며 이 버튼 한 번으로 자원과 보안 관찰을 함께 읽습니다.', 'muted'));
+    guide.append(makeNode('p', 'CPU는 200ms 표본이며 변화는 사용률의 차이(%p)입니다. 용량은 제공 카드와 같이 1 GB = 1024³바이트입니다. 그래프 비율은 반올림 전 측정값으로 계산합니다. 값은 각 조회 시각의 관찰이며 지금 상태를 보장하지 않습니다. 두 조회 사이의 지속 추이나 원인·침해·공격·악성코드 여부를 판단하지 않습니다.', 'muted'));
+    history.append(guide);
+    bottom.append(history);
+    section.append(makeNode('hr'), bottom);
+    for (const detail of section.querySelectorAll('[data-pc-disclosure]')) {
+      const key = detail.getAttribute('data-pc-disclosure');
+      detail.open = openDetails.has(key);
+      detail.addEventListener('toggle', () => { if (detail.isConnected) { if (detail.open) openDetails.add(key); else openDetails.delete(key); } });
+    }
+    // SVG 폭만 맞춘다. 스타일/CSP를 변경하지 않으며 조회·주기적 타이머를 만들지 않는다.
+    const fit = () => {
+      const availableWidth = rings.clientWidth;
+      if (!section.isConnected || !availableWidth) return;
+      const columns = availableWidth >= 780 ? 3 : availableWidth >= 500 ? 2 : 1;
+      const width = Math.max(150, Math.floor((availableWidth - 8 * (columns - 1)) / columns) - 30);
+      const center = width / 2;
+      for (const svg of rings.querySelectorAll('[data-student-pc-ring]')) {
+        svg.setAttribute('width', String(width));
+        svg.setAttribute('viewBox', `0 0 ${width} 156`);
+        for (const circle of svg.querySelectorAll('circle')) circle.setAttribute('cx', String(center));
+        svg.querySelector('[data-student-pc-arc]').setAttribute('transform', `rotate(-90 ${center} 78)`);
+        svg.querySelector('text').setAttribute('x', String(center));
+      }
+    };
+    if (typeof ResizeObserver === 'function') { layoutObserver = new ResizeObserver(fit); layoutObserver.observe(rings); }
     return section;
   }
   return { render };
@@ -1604,7 +1712,27 @@ export function createStudentView({ api, onChange } = {}) {
   return {
     renderIdentity({ me, devices, sessions } = {}) {
       const root = makeNode('div', null, 'student-identity');
-      root.append(identitySection(me), deviceSection(devices), sessionSection(sessions));
+      root.append(makeNode('h3', '계정·기기·세션 요약'));
+      const mode = modeNote(me);
+      if (mode) root.append(mode);
+      const notice = resourceNotice(me, '로그인 정보');
+      if (notice) root.append(notice);
+      else {
+        const data = me?.data && typeof me.data === 'object' ? me.data : {};
+        const device = describeState(DEVICE_TEXT, data.device?.status);
+        const session = describeState(SESSION_TEXT, data.session?.status);
+        root.append(makeNode('p', `${plainText(data.user?.label, plainText(data.user?.id))} · 기기 ${device.text} · 세션 ${session.text}`, 'item-title'));
+        if (device.note) root.append(makeNode('p', `기기: ${device.note}`, 'muted'));
+        if (session.note) root.append(makeNode('p', `세션: ${session.note}`, 'muted'));
+      }
+      const describe = resource => resource?.status === 'ok' && Array.isArray(resource.data) ? `${resource.data.length}개` : resource?.status === 'loading' ? '조회 중' : '확인 불가';
+      const attention = (resource, normal) => resource?.status === 'ok' && Array.isArray(resource.data) ? resource.data.filter(item => item?.status !== normal).length : null;
+      const deviceAttention = attention(devices, 'compliant'), sessionAttention = attention(sessions, 'active');
+      root.append(makeNode('p', `기기 목록 ${describe(devices)}${deviceAttention === null ? '' : ` · 주의/확인 불가 ${deviceAttention}개`} / 세션 목록 ${describe(sessions)}${sessionAttention === null ? '' : ` · 주의/확인 불가 ${sessionAttention}개`}`, 'muted'));
+      if (deviceAttention === null || sessionAttention === null) root.append(makeNode('p', '목록을 확인하지 못했거나 조회 중입니다. 상세에서 이유를 확인하고 필요하면 위쪽 「다시 불러오기」를 누르세요.', 'muted'));
+      const lists = pcDetails('사용자 식별 정보·기기·세션 목록 상세');
+      lists.append(identitySection(me), deviceSection(devices), sessionSection(sessions));
+      root.append(lists);
       return root;
     },
     renderDecision(input) {
@@ -1619,7 +1747,7 @@ export function createStudentView({ api, onChange } = {}) {
     },
     renderStatus(input) {
       const root = makeNode('div', null, 'student-status');
-      root.append(pcComparison.render(input), statusSection(input));
+      root.append(pcComparison.render(input), studentStatusDetails(input));
       return root;
     },
     renderVulnerabilities(input) {
