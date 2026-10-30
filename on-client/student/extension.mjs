@@ -1355,7 +1355,157 @@ function vulnerabilitiesSection(input) {
   return section;
 }
 
-export function createStudentView() {
+// ---------- 마무리 2단계: 제공 PC 조회를 활용한 두 시점 비교 ----------
+// 측정은 제공 api.get만 사용한다. 상태는 createStudentView 인스턴스 안에서만 보관한다.
+const PC_COMPARE_FIELDS = [
+  { key: 'cpu', title: 'CPU 사용률', unit: '%p' },
+  { key: 'memory', title: '메모리 사용량', unit: 'GB' },
+  { key: 'disk', title: '디스크 여유 공간', unit: 'GB' },
+];
+const PC_COMPARE_REASONS = {
+  permission_denied: '일반 권한으로 읽을 수 없습니다. 관리자 권한으로 변경하지 않습니다.',
+  unsupported: '이 환경에서는 이 항목을 지원하지 않습니다.',
+  timeout: '조회 시간이 초과됐습니다. 잠시 후 다시 조회하세요.',
+  cancelled: '조회가 취소됐습니다. 필요하면 다시 조회하세요.',
+  query_failed: '이번 조회에서 값을 읽지 못했습니다. 다시 조회하고 계속되면 담당자에게 확인하세요.',
+  invalid_sample: 'CPU 표본을 확인하지 못했습니다. 다시 조회하세요.',
+  invalid_response: '값이나 단위를 확인할 수 없습니다. 다시 조회하고 계속되면 담당자에게 확인하세요.',
+};
+
+function pcCompareMetric(key, metric) {
+  const unavailable = reason => ({ value: null, text: '확인 불가', reason });
+  if (metric?.state !== 'ok') return unavailable(PC_COMPARE_REASONS[metric?.reason] || PC_COMPARE_REASONS.query_failed);
+  const bytes = value => Number.isSafeInteger(value) && value >= 0;
+  const gb = value => (value / 1024 ** 3).toFixed(1);
+  if (key === 'cpu' && Number.isFinite(metric.usagePercent) && metric.usagePercent >= 0 && metric.usagePercent <= 100 && metric.sampleMs === 200) {
+    return { value: metric.usagePercent, text: `${metric.usagePercent.toFixed(1)}%`, total: null };
+  }
+  const used = key === 'memory' ? metric.usedBytes : metric.freeBytes;
+  if (key !== 'cpu' && bytes(used) && bytes(metric.totalBytes) && metric.totalBytes > 0 && used <= metric.totalBytes) {
+    return { value: used / 1024 ** 3, total: metric.totalBytes, text: `${gb(used)} GB ${key === 'memory' ? '사용' : '여유'} / 전체 ${gb(metric.totalBytes)} GB` };
+  }
+  return unavailable(PC_COMPARE_REASONS.invalid_response);
+}
+
+function pcCompareSnapshot(data, previous) {
+  const at = typeof data?.measuredAt === 'string' && /(?:Z|[+-]\d{2}:\d{2})$/.test(data.measuredAt) ? Date.parse(data.measuredAt) : NaN;
+  if (data?.schema !== 'aleph.on.pc-status.v1' || data.source !== 'local-pc' || !Number.isFinite(at)) {
+    throw Error('PC_RESPONSE_INVALID');
+  }
+  if (Math.abs(Date.now() - at) > 60000 || (previous && at <= Date.parse(previous.measuredAt))) {
+    throw Error('PC_RESPONSE_STALE');
+  }
+  const metrics = Object.fromEntries(PC_COMPARE_FIELDS.map(field => [field.key, pcCompareMetric(field.key, data.metrics?.[field.key])]));
+  return { measuredAt: data.measuredAt, metrics };
+}
+
+function pcCompareChange(before, current, field) {
+  if (current.value === null) return '비교 불가 — 현재 값을 읽지 못했습니다.';
+  if (!before) return '첫 조회이므로 비교할 이전 자료가 없습니다.';
+  if (before.value === null) return '비교 불가 — 이전 조회에서 이 항목을 읽지 못했습니다.';
+  if (before.total !== current.total) return '비교 불가 — 전체 용량이 달라 같은 범위인지 확인해야 합니다.';
+  const delta = current.value - before.value;
+  if (delta === 0) return `표본 간 변화 없음 (0.0 ${field.unit})`;
+  const amount = Math.abs(delta);
+  return `${amount + 1e-9 < 0.1 ? `0.1 ${field.unit} 미만` : `${amount.toFixed(1)} ${field.unit}`} ${delta > 0 ? '증가' : '감소'}`;
+}
+
+function createPcComparison({ api, onChange }) {
+  const buttonId = 'student-pc-compare-refresh';
+  const available = typeof api?.get === 'function';
+  let state = { phase: 'idle', current: null, previous: null, failure: '' };
+  let busy = false;
+  const notify = () => {
+    const restoreFocus = document.activeElement?.id === buttonId;
+    if (typeof onChange === 'function') onChange();
+    if (restoreFocus) document.getElementById(buttonId)?.focus();
+  };
+  async function read() {
+    if (busy || !available) return;
+    busy = true;
+    const previous = state.current;
+    state = { phase: 'loading', current: null, previous: null, failure: '' };
+    notify();
+    let timer;
+    try {
+      const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(Error('TIMEOUT')), 12000); });
+      const result = await Promise.race([api.get('/api/pc/status'), timeout]);
+      if (result?.ok !== true) {
+        const code = result?.error?.code;
+        if (code === 'NOT_ALLOWED') throw Error('PC_NOT_ALLOWED');
+        throw Error(code === 'TIMEOUT' ? 'TIMEOUT' : 'PC_REQUEST_FAILED');
+      }
+      const current = pcCompareSnapshot(result.data, previous);
+      state = { phase: 'ready', current, previous, failure: '' };
+    } catch (error) {
+      const messages = {
+        TIMEOUT: '조회 시간이 초과됐습니다. 앱 실행 상태를 확인하고 다시 조회하세요.',
+        PC_NOT_ALLOWED: '이 앱 판에서는 학생 PC 조회를 지원하지 않습니다. 위쪽 제공 「내 PC 상태」를 확인하세요.',
+        PC_RESPONSE_INVALID: 'PC 응답의 출처·측정 시각·형식을 확인하지 못했습니다. 다시 조회하고 계속되면 담당자에게 확인하세요.',
+        PC_RESPONSE_STALE: '오래됐거나 이전보다 새롭지 않은 측정값입니다. 앱과 PC 시각을 확인하고 다시 조회하세요.',
+        PC_REQUEST_FAILED: '로컬 서버에서 PC 값을 받지 못했습니다. 앱이 실행 중인지 확인하고 다시 조회하세요.',
+      };
+      state = { phase: 'error', current: null, previous: null, failure: Object.hasOwn(messages, error?.message) ? messages[error.message] : messages.PC_REQUEST_FAILED };
+    } finally {
+      clearTimeout(timer);
+      busy = false;
+      notify();
+    }
+  }
+  function render() {
+    const section = makeNode('section');
+    section.setAttribute('data-student-pc-comparison', 'true');
+    section.setAttribute('aria-busy', String(busy));
+    section.append(makeNode('h3', 'PC 조회 변화 비교'));
+    section.append(makeNode('p', '제공 기능이 측정하고, 학생 구현이 두 조회의 차이를 비교합니다. 위쪽 「내 PC 상태」의 조회와는 별도로 이 버튼을 눌러 비교 자료를 읽습니다.', 'muted'));
+    section.append(makeNode('p', 'PC 실측은 보안 사건의 예시 모드·SDP 서버 연결 상태와 별개입니다. 비교 자료는 이 화면을 열어 둔 동안만 보관하며, 새로고침하면 초기화합니다.', 'muted'));
+    const button = makeNode('button', busy ? 'PC 조회 중…' : state.phase === 'idle' ? '비교용 조회' : '다시 조회', 'btn');
+    button.id = buttonId;
+    button.type = 'button';
+    button.disabled = !available;
+    button.setAttribute('aria-disabled', String(busy || !available));
+    button.addEventListener('click', () => { void read(); });
+    section.append(button);
+    const status = makeNode('p');
+    status.setAttribute('role', 'status');
+    if (!available) status.textContent = '학생 PC 조회를 사용할 수 없습니다. 위쪽 제공 「내 PC 상태」를 확인하세요.';
+    else if (state.phase === 'idle') status.textContent = '아직 조회하지 않았습니다. 버튼을 누르면 일반 권한으로 한 번 읽습니다. 자동으로 반복 조회하지 않습니다.';
+    else if (busy) status.textContent = 'PC 실측 조회 중입니다. 이전 값을 현재 결과로 표시하지 않으며 중복 요청하지 않습니다.';
+    else if (state.phase === 'error') {
+      status.className = 'state state-error';
+      status.textContent = `조회 실패 · CPU·메모리·디스크 확인 불가. ${state.failure} 비교 자료는 초기화했습니다.`;
+    }
+    section.append(status);
+    if (state.phase === 'ready') {
+      const count = PC_COMPARE_FIELDS.filter(field => state.current.metrics[field.key].value !== null).length;
+      status.textContent = `${count === 3 ? '조회 완료' : count === 0 ? '확인 불가' : '부분 결과'} · 실측 ${count}/3 · 확인 불가 ${3 - count}개`;
+      section.append(makeNode('p', `${count > 0 ? '[실측]' : '[PC 조회 응답]'} 출처: 이 앱을 실행한 PC의 제공 조회 기능 (/api/pc/status)`, 'muted'));
+      const times = makeNode('dl', null, 'kv');
+      times.append(makeNode('dt', '이전 조회 시각'), makeNode('dd', state.previous ? eventTime(state.previous.measuredAt) : '이전 자료 없음'));
+      times.append(makeNode('dt', '이번 조회 시각'), makeNode('dd', eventTime(state.current.measuredAt)));
+      section.append(times);
+      for (const field of PC_COMPARE_FIELDS) {
+        const row = makeNode('section');
+        row.setAttribute('data-student-pc-metric', field.key);
+        row.append(makeNode('hr'), makeNode('h4', field.title));
+        const before = state.previous?.metrics[field.key], current = state.current.metrics[field.key];
+        const facts = makeNode('dl', null, 'kv');
+        const oldValue = makeNode('dd', before ? before.text + (before.reason ? ` — ${before.reason}` : '') : '이전 조회 없음');
+        const newValue = makeNode('dd', current.text + (current.reason ? ` — ${current.reason}` : ''));
+        const change = makeNode('dd', pcCompareChange(before, current, field));
+        newValue.setAttribute('data-pc-compare-value', 'current');
+        facts.append(makeNode('dt', '이전 조회값'), oldValue, makeNode('dt', '이번 조회값'), newValue, makeNode('dt', '변화·한계'), change);
+        row.append(facts); section.append(row);
+      }
+    }
+    section.append(makeNode('p', '이전·이번 값은 위에 적힌 각 조회 시각의 값이며 지금 상태를 보장하지 않습니다. CPU는 200ms 표본이며 변화는 사용률의 차이(%p)입니다. 용량은 제공 카드와 같이 1 GB = 1024³바이트로 표시합니다. 두 조회 사이의 지속 추이나 원인을 확인한 결과는 아니며, 변화만으로 침해·공격·악성코드 여부를 판단하지 않습니다.', 'muted'));
+    return section;
+  }
+  return { render };
+}
+
+export function createStudentView({ api, onChange } = {}) {
+  const pcComparison = createPcComparison({ api, onChange });
   return {
     renderIdentity({ me, devices, sessions } = {}) {
       const root = makeNode('div', null, 'student-identity');
@@ -1374,7 +1524,7 @@ export function createStudentView() {
     },
     renderStatus(input) {
       const root = makeNode('div', null, 'student-status');
-      root.append(statusSection(input));
+      root.append(pcComparison.render(), statusSection(input));
       return root;
     },
     renderVulnerabilities(input) {
