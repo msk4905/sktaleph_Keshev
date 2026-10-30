@@ -1387,6 +1387,100 @@ function pcCompareMetric(key, metric) {
   return unavailable(PC_COMPARE_REASONS.invalid_response);
 }
 
+// ---------- 마무리 3단계: 같은 PC 조회 응답의 보안 관찰 요약 ----------
+const PC_SECURITY_FIELDS = [
+  { key: 'network', title: '네트워크 구성' },
+  { key: 'firewall', title: 'Windows 방화벽 설정' },
+  { key: 'events', title: 'Windows 기록' },
+];
+
+function pcSecuritySnapshot(data) {
+  const result = {};
+  const count = value => Number.isSafeInteger(value) && value >= 0;
+  const invalid = () => ({ state: 'unavailable', reason: PC_COMPARE_REASONS.invalid_response });
+  for (const field of PC_SECURITY_FIELDS) {
+    const metric = data.metrics?.[field.key];
+    result[field.key] = metric?.state === 'ok' ? invalid() : {
+      state: 'unavailable',
+      reason: metric ? (Object.hasOwn(PC_COMPARE_REASONS, metric.reason) ? PC_COMPARE_REASONS[metric.reason] : PC_COMPARE_REASONS.query_failed) : '제공 응답에 이 항목이 없습니다. 다시 조회하고 계속되면 담당자에게 확인하세요.',
+    };
+  }
+  const network = data.metrics?.network;
+  if (network?.state === 'ok' && count(network.interfaceCount) && count(network.ipv4Count)) {
+    result.network = {
+      state: 'ok', text: `인터페이스 ${network.interfaceCount}개 · IPv4 구성 ${network.ipv4Count}개`,
+      note: '로컬 구성의 개수 요약입니다. 개수만으로 인터넷 연결·통신 품질·SDP 접속 허용 여부를 판단하지 않습니다.',
+    };
+  }
+  const firewall = data.metrics?.firewall;
+  const names = ['Domain', 'Private', 'Public'];
+  if (firewall?.state === 'ok' && Array.isArray(firewall.profiles) && firewall.profiles.length === 3
+      && names.every(name => firewall.profiles.filter(profile => profile?.name === name && typeof profile.enabled === 'boolean').length === 1)) {
+    const profiles = names.map(name => firewall.profiles.find(profile => profile.name === name));
+    const off = profiles.filter(profile => !profile.enabled).map(profile => profile.name);
+    result.firewall = {
+      state: 'ok', text: profiles.map(profile => `${profile.name}: ${profile.enabled ? '켜짐' : '꺼짐'}`).join(' · '),
+      note: off.length ? `꺼진 프로필 관찰: ${off.join(', ')}. 현재 적용 중인 프로필과 운영 정책은 별도 확인이 필요합니다. 설정을 바꾸지 말고 필요하면 담당자에게 확인하세요.`
+        : '세 프로필의 설정을 읽었습니다. 현재 적용 중인 프로필·개별 규칙·PC 전체의 안전을 확인한 결과는 아닙니다.',
+    };
+  }
+  const events = data.metrics?.events;
+  const since = typeof events?.since === 'string' && /(?:Z|[+-]\d{2}:\d{2})$/.test(events.since) ? Date.parse(events.since) : NaN;
+  const at = Date.parse(data.measuredAt);
+  if (events?.state === 'ok' && count(events.warningCount) && count(events.errorCount)
+      && events.warningCount + events.errorCount <= 5000 && events.sampleLimit === 5000 && typeof events.truncated === 'boolean'
+      && Number.isFinite(since) && since <= at && Math.abs(at - since - 24 * 60 * 60 * 1000) <= 60000) {
+    result.events = {
+      state: 'ok', text: `최근 24시간 경고 ${events.warningCount}건 · 오류 ${events.errorCount}건${events.truncated ? ' · 일부 집계' : ''}`,
+      note: `System·Application 합산 · 집계 시작 ${eventTime(events.since)} · 조회 시각까지 최대 5,000건을 읽은 집계입니다. ${events.truncated ? '전체 건수가 아니며, 일부 집계의 차이를 새 사건 건수로 해석하지 않습니다.' : '기록 본문과 원인은 이 조회에 포함되지 않습니다.'}`,
+    };
+  }
+  return result;
+}
+
+function pcSdpObservation(input) {
+  const mode = input?.mode;
+  if (mode === 'demo') return 'SDP 미연결 · 보안 사건과 계정·기기·세션 표시는 예시(demo)입니다. PC 실측 성공과는 별개입니다.';
+  if (mode === 'disconnected') return 'SDP 미연결 · 기존 서버 연결이 설정되지 않은 실행 상태입니다. PC 조회는 별도로 사용할 수 있습니다.';
+  if (mode === 'connected') return 'SDP 연결 확인 불가 · 서버가 connected 모드를 보고했지만, 학생 화면에 전달된 자료만으로 실제 SDP 통신 성공까지 확인할 수 없습니다. PC 조회 성공을 SDP 연결 성공으로 표시하지 않습니다.';
+  return 'SDP 연결 확인 불가 · 연결 자료를 불러오는 중이거나 응답이 없거나 일치하지 않습니다. 필요하면 위쪽 「다시 불러오기」로 서버 상태를 확인하세요.';
+}
+
+function renderPcSecurityObservation(state, input, available) {
+  const section = makeNode('section');
+  section.setAttribute('data-student-pc-security', 'true');
+  section.append(makeNode('hr'), makeNode('h4', 'PC 보안 관찰 요약'));
+  const sdp = makeNode('p', pcSdpObservation(input), 'state state-empty');
+  sdp.setAttribute('data-student-sdp-status', 'true');
+  section.append(sdp);
+  section.append(makeNode('p', '이 건수는 침해나 공격 탐지 결과가 아닙니다. 방화벽·보안 설정을 읽기만 하며 변경하거나 관리자 권한으로 다시 시도하지 않습니다.', 'muted'));
+  const snapshot = state.phase === 'ready' ? state.current : null;
+  if (snapshot) {
+    const observed = PC_SECURITY_FIELDS.filter(field => snapshot.observations[field.key].state === 'ok').length;
+    section.append(makeNode('p', `보안 관찰 ${observed}/3개 항목 확인 · 확인 불가 ${3 - observed}개${observed === 0 ? ' · 값을 읽은 항목이 없습니다.' : ''}`));
+    section.append(makeNode('p', `${observed > 0 ? '[실측]' : '[PC 조회 응답]'} 출처: 제공 PC 조회 · 조회 시각 ${eventTime(snapshot.measuredAt)}. 아래 값은 이 시각의 관찰이며 지금 상태를 보장하지 않습니다.`, 'muted'));
+  }
+  for (const field of PC_SECURITY_FIELDS) {
+    const item = makeNode('section');
+    item.setAttribute('data-student-pc-observation', field.key);
+    item.append(makeNode('h5', field.title));
+    const metric = snapshot?.observations[field.key];
+    if (metric?.state === 'ok') {
+      item.append(makeNode('p', metric.text), makeNode('p', metric.note, 'muted'));
+    } else {
+      let reason;
+      if (!available) reason = '학생 PC 조회를 지원하지 않습니다. 위쪽 제공 「내 PC 상태」를 확인하세요.';
+      else if (state.phase === 'loading') reason = '조회 중입니다. 이전 값을 현재 결과로 표시하지 않습니다.';
+      else if (state.phase === 'error') reason = `이번 조회가 실패했습니다. ${state.failure}`;
+      else if (snapshot) reason = metric.reason;
+      else reason = '아직 조회하지 않았습니다. 위의 「비교용 조회」를 눌러 읽으세요.';
+      item.append(makeNode('p', `확인 불가 — ${reason}`, 'muted'));
+    }
+    section.append(item);
+  }
+  return section;
+}
+
 function pcCompareSnapshot(data, previous) {
   const at = typeof data?.measuredAt === 'string' && /(?:Z|[+-]\d{2}:\d{2})$/.test(data.measuredAt) ? Date.parse(data.measuredAt) : NaN;
   if (data?.schema !== 'aleph.on.pc-status.v1' || data.source !== 'local-pc' || !Number.isFinite(at)) {
@@ -1396,7 +1490,7 @@ function pcCompareSnapshot(data, previous) {
     throw Error('PC_RESPONSE_STALE');
   }
   const metrics = Object.fromEntries(PC_COMPARE_FIELDS.map(field => [field.key, pcCompareMetric(field.key, data.metrics?.[field.key])]));
-  return { measuredAt: data.measuredAt, metrics };
+  return { measuredAt: data.measuredAt, metrics, observations: pcSecuritySnapshot(data) };
 }
 
 function pcCompareChange(before, current, field) {
@@ -1452,12 +1546,12 @@ function createPcComparison({ api, onChange }) {
       notify();
     }
   }
-  function render() {
+  function render(input) {
     const section = makeNode('section');
     section.setAttribute('data-student-pc-comparison', 'true');
     section.setAttribute('aria-busy', String(busy));
     section.append(makeNode('h3', 'PC 조회 변화 비교'));
-    section.append(makeNode('p', '제공 기능이 측정하고, 학생 구현이 두 조회의 차이를 비교합니다. 위쪽 「내 PC 상태」의 조회와는 별도로 이 버튼을 눌러 비교 자료를 읽습니다.', 'muted'));
+    section.append(makeNode('p', '제공 기능이 측정하고, 학생 구현이 변화 비교와 보안 관찰을 설명합니다. 이 버튼 한 번으로 비교와 보안 관찰 자료를 함께 읽습니다. 위쪽 제공 「내 PC 상태」의 조회와는 별개입니다.', 'muted'));
     section.append(makeNode('p', 'PC 실측은 보안 사건의 예시 모드·SDP 서버 연결 상태와 별개입니다. 비교 자료는 이 화면을 열어 둔 동안만 보관하며, 새로고침하면 초기화합니다.', 'muted'));
     const button = makeNode('button', busy ? 'PC 조회 중…' : state.phase === 'idle' ? '비교용 조회' : '다시 조회', 'btn');
     button.id = buttonId;
@@ -1476,6 +1570,7 @@ function createPcComparison({ api, onChange }) {
       status.textContent = `조회 실패 · CPU·메모리·디스크 확인 불가. ${state.failure} 비교 자료는 초기화했습니다.`;
     }
     section.append(status);
+    section.append(renderPcSecurityObservation(state, input, available));
     if (state.phase === 'ready') {
       const count = PC_COMPARE_FIELDS.filter(field => state.current.metrics[field.key].value !== null).length;
       status.textContent = `${count === 3 ? '조회 완료' : count === 0 ? '확인 불가' : '부분 결과'} · 실측 ${count}/3 · 확인 불가 ${3 - count}개`;
@@ -1524,7 +1619,7 @@ export function createStudentView({ api, onChange } = {}) {
     },
     renderStatus(input) {
       const root = makeNode('div', null, 'student-status');
-      root.append(pcComparison.render(), statusSection(input));
+      root.append(pcComparison.render(input), statusSection(input));
       return root;
     },
     renderVulnerabilities(input) {
